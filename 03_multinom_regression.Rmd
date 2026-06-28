@@ -1,0 +1,367 @@
+---
+title: "Multinomial Logistic Regression"
+output: html_document
+date: "2024-12-22"
+---
+
+
+- Selected covariates based on an unadjusted analysis of JUSTICE variables stratified by sleep phenotype (see latent_class_analysis.Rmd file) 
+- See Table 3 here: https://www.ahajournals.org/doi/10.1161/JAHA.124.035683?url_ver=Z39.88-2003&rfr_id=ori:rid:crossref.org&rfr_dat=cr_pub%20%200pubme
+
+```{r, include=F}
+knitr::opts_chunk$set(echo = F, include=T, message=F, warning=F)
+
+
+check_cat <- function(var_name) {
+  
+  # Show the current reference category (the first level)
+  ref <- levels(sleep_justice[[var_name]])[1]
+  
+  cat("Current reference category:", ref, "\n")
+  
+  # Show the counts of each category
+  category_counts <- table(sleep_justice[[var_name]], exclude = F)
+  print(category_counts)
+  
+  # Check if any category has very low counts (less than 10)
+  low_count_categories <- category_counts[category_counts < 10]
+  if (length(low_count_categories) > 0) {
+    cat("\nWarning: Categories with low counts (< 10):\n")
+    print(low_count_categories)
+  }
+}
+ 
+check_cat2 <- function(df, cat) {
+  # Ensure the input column exists
+  if (!cat %in% colnames(df)) {
+    stop("The specified categorical variable does not exist in the dataframe.")
+  }
+  if (!"lc4_class" %in% colnames(df)) {
+    stop("The outcome variable 'lc4_class' is not found in the dataframe.")
+  }
+
+  # Create a contingency table of the categorical variable against the outcome
+  contingency_table <- table(df[[cat]], df$lc4_class)
+
+  # Identify levels with fewer than 10 values in any class of lc4_class
+  problematic_levels <- apply(contingency_table, 1, function(row) any(row < 10))
+
+  # Output the problematic levels
+  if (any(problematic_levels)) {
+    cat("Levels with fewer than 10 values in any class of lc4_class:\n")
+    print(contingency_table[problematic_levels, , drop = FALSE])
+  } else {
+    cat("No levels with fewer than 10 values found.\n")
+  }
+}
+ 
+  
+ impute_cat <- function(data, cat_vars) {
+  # Ensure all categorical variables with missing values have 'Unknown' as a level and replace NAs
+  data <- data %>%
+    mutate(across(all_of(cat_vars), ~{
+      if (any(is.na(.))) {  # Only process variables with missing values
+        # Add "Unknown" as a level if it's not already a factor level
+        if (!"Unknown" %in% levels(.)) {
+          . <- factor(., levels = c(levels(.), "Unknown"))
+        }
+        # Replace NA with "Unknown"
+        replace(., is.na(.), "Unknown")
+      } else {
+        .  # If no NAs, leave the variable as is
+      }
+    }))
+  
+  return(data)
+}
+
+# Define the function
+create_histogram <- function(data, x_var) {
+  ggplot(data, aes_string(x = x_var)) +  # Use aes_string to reference the variable dynamically
+    geom_histogram(binwidth = 1, fill = "skyblue", color = "black") +  # Histogram
+    geom_vline(aes_string(xintercept = paste("median(", x_var, ", na.rm = TRUE)", sep = "")), 
+               color = "red", linetype = "dashed", size = 1) +  # Add vertical line at the median
+    labs(title = paste("Histogram of", x_var), x = x_var, y = "Frequency") +  # Dynamic title and x-axis label
+    theme_minimal()
+}
+
+summarize_model <- function(model, model_name) {
+  cat(paste("Number of covariates in", model_name, ":", length(model$coefnames)), "\n")
+  cat(paste(model$coefnames, collapse = "\n"), "\n")
+}
+
+
+get_stars = function(p){
+    case_when(p <= 0.001 ~ "***",
+        p <= 0.01 ~ "**",
+        p <= 0.05 ~ "*",
+        p <= 0.1 ~ ".",
+        TRUE ~ " ")
+        }
+
+
+# Define a function to calculate p-values, exponentiated coefficients, and confidence intervals
+get_model_results <- function(model) {
+  z <- summary(model)$coefficients / summary(model)$standard.errors
+  p <- (1 - pnorm(abs(z), 0, 1)) * 2
+  coef_exp <- exp(coef(model))
+  conf_int <- exp(confint(model, level = 0.95))
+  
+  list(p_values = p, exp_coef = coef_exp, conf_int = conf_int)
+}
+
+# Function to get results_df for "lesion" terms
+get_results_df <- function(model) {
+  tidy(model, exponentiate = TRUE, conf.int = TRUE) %>%
+    mutate(stars = get_stars(p.value)) 
+}
+
+
+
+# Define a function to create the multinomial logistic regression plot
+plot_or <- function(model, model_data, title) {
+  
+  # Extract coefficients and confidence intervals
+  tidy_results <- broom::tidy(model, conf.int = TRUE)
+  
+  # Convert estimates to odds ratios (exponentiate coefficients)
+  tidy_results <- tidy_results %>%
+    mutate(estimate = exp(estimate),
+           conf.low = exp(conf.low),
+           conf.high = exp(conf.high)) %>%
+    filter(term != "(Intercept)") %>%
+    rename(Class = y.level)
+
+  # Define significance levels
+  tidy_results <- tidy_results %>%
+    mutate(significance = case_when(
+      p.value < 0.001 ~ "***",
+      p.value < 0.01  ~ "**",
+      p.value < 0.05  ~ "*",
+      TRUE            ~ ""
+    ))
+
+  # Define variable label mappings (ensuring alignment with the table)
+  variable_labels <- c(
+    "paroleYes" = "Current parole (Yes)",
+    "Gen_healthFair/poor" = "General Health (Fair/Poor)",
+    "ptsd_score" = "Total PTSD Score",
+    "Adv_score" = "Total Lifetime Adversity Score",
+    "PHQ9_score" = "Total PHQ9 Score",
+    "GSE_score" = "Self-Efficacy Score",
+    "Pss_score" = "Perceived Stress Scale Score",
+    "Discrim_score" = "Perceived Discrimination Score",
+    "EducationHS" = "Education (HS)",
+    "EducationLessHS" = "Education (Less than HS)",
+    "RaceHispanic" = "Race (Hispanic)",
+    "Age" = "Age at First Visit"
+  )
+
+  # Apply labels
+  tidy_results$term <- factor(tidy_results$term, levels = names(variable_labels), labels = variable_labels)
+
+  # Define custom color mapping
+  custom_colors <- c("Moderate-quality controlled sleep\n(Class 2)" = "#7CAE00",
+                     "Poor-quality limited control sleep with OSA risk\n(Class 3)" = "#00BFC4",
+                     "Severely impaired uncontrolled sleep with insomnia\n(Class 4)" = "#F8766D")
+
+                           #putting 1-4 for the figure even though the levels names are different 
+
+  # Plot using ggplot2
+  ggplot(tidy_results, aes(x = estimate, y = term, color = Class)) +
+    geom_point(size = 2) +
+    geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2) +
+    facet_wrap(~ Class, scales = "free") +
+    geom_vline(xintercept = 1, linetype = "dashed", color = "black") +
+    scale_x_log10(breaks = c(0.01, 0.1, 1, 10, 100), labels = c("0.01", "0.1", "1", "10", "100")) +
+    scale_color_manual(values = custom_colors) +
+    geom_text(aes(label = significance), nudge_x = 0.2, size = 5, color = "black") +  # Add asterisks
+    theme_minimal() +
+    labs(title = title,
+         x = "Odds Ratio",
+         y = "Predictor Variable") +
+    theme(legend.position = "none")
+}
+
+
+```
+
+
+
+
+```{r setup, include=FALSE}
+library(nnet)
+library(tidyverse)
+library(naniar)
+library(table1)
+library(MASS)
+library(broom)
+library(forcats)
+library(gtsummary)
+
+load("../data/clean/sleep_justice.Rda")
+
+
+dd = read_csv("../resources/data_dictionary_justice.csv", show_col_types = F, col_select = c("variable", "type"))
+
+
+my_vars <- c("participant_id", "lc4_class", "Age", "Race", "self_gender", "Education", "Civil_status","Income_4cat",
+                   "Discrim_score", "Pss_score", "GSE_score", "PHQ9_score", "Adv_score", "ptsd_score","Gen_health",
+                   "Residence",
+                   "parole", "probation", "solitary", "Sol_time",
+                   "Food_ins",
+                   "psqi_sleep_satisfaction", "psqi_sleep_latency", "psqi_sleep_duration", 
+                   "psqi_sleep_efficiency", "psqi_sleep_disturbance", "psqi_sleep_alertness", 
+                   "bangosa_score_cat", "psqi_insomnia", "psqi_med")
+
+
+
+df2 = sleep_justice %>%
+    dplyr::select(all_of(my_vars)) %>%
+    mutate(
+        Residence = relevel(Residence, "Transitional home"),
+        Gen_health = relevel(Gen_health, "Good to Excellent")
+        )  %>%
+    dplyr::select(-self_gender, -starts_with("psqi"), -bangosa_score_cat, -probation, -Food_ins, -Sol_time)
+
+
+my_vars2 = names(df2)
+
+dd2 = dd %>%
+    filter(variable %in% my_vars2)  
+           
+
+cat_vars = dd2 %>% filter(type %in% c("category","binary")) %>% pull(variable)
+num_vars = dd2 %>% filter(type == "continuous") %>% pull(variable)
+
+```
+
+
+
+```{r}
+df3 <- df2 %>%
+    impute_cat(., cat_vars) %>%
+    drop_na() %>%
+    mutate(across(all_of(cat_vars), droplevels))
+```
+
+
+```{r, include=F}
+set.seed(1)
+m1 = multinom(lc4_class ~ . - participant_id, data=df3)
+```
+
+```{r, include=F}
+m2 <- stepAIC(m1, direction = "both", trace = FALSE)
+```
+
+
+```{r}
+paste("Number of covariates in Model 1:", length(m1$coefnames))
+paste(m1$coefnames)
+paste("Number of covariates in Model 2:", length(m2$coefnames))
+paste(m2$coefnames)
+```
+
+Need to drop:
+Residence: Very low counts of all levels except transitional housing.
+Income: Very low counts of all levels except No income
+Civil Status: Very low counts of all levels except Single, need to drop
+Solitary: Lots of missing, so unknown is coming up as a coefficient
+
+Race: Low counts of NH white and NH other, will need to create a hispanic binary variable
+Education: Need to combine HS grad and GED together, Some college/College grad
+
+
+```{r}
+
+df2 = sleep_justice %>%
+    dplyr::select(all_of(my_vars)) %>%
+    mutate(
+        Residence = relevel(Residence, "Transitional home"),
+        Gen_health = relevel(Gen_health, "Good to Excellent"),
+        Race = fct_collapse(Race, 
+                            NonHispanic = c("Non-hispanic white", "Non-hispanic black","Non-hispanic other"),
+                            Hispanic = c("Hispanic")),
+        Education = fct_collapse(Education,
+                                 College = c("Some college/tech",
+                                             "College grad/grad school"),
+                                 HS = c("HS grad","GED"),
+                                 LessHS = c("Less than HS")),
+        Education = relevel(Education, "College"))%>%
+    dplyr::select(-self_gender, -starts_with("psqi"), -bangosa_score_cat, -probation, -Food_ins, -Sol_time, -Residence, -Income_4cat, -Civil_status, -solitary)
+
+
+my_vars2 = names(df2)
+
+dd2 = dd %>%
+    filter(variable %in% my_vars2)  
+           
+
+cat_vars = dd2 %>% filter(type %in% c("category","binary")) %>% pull(variable)
+num_vars = dd2 %>% filter(type == "continuous") %>% pull(variable)
+
+
+
+```
+
+```{r}
+df3 <- df2 %>%
+    impute_cat(., cat_vars) %>%
+    drop_na() %>%
+    mutate(across(all_of(cat_vars), droplevels))
+```
+
+```{r, include=F}
+set.seed(1)
+m1 = multinom(lc4_class ~ . - participant_id, data=df3)
+```
+
+```{r, include=F}
+m2 <- stepAIC(m1, direction = "both", trace = FALSE)
+```
+
+```{r}
+summarize_model(m1, "Model 1")
+```
+```{r}
+summarize_model(m2, "Model 2")
+```
+
+Interpretation: After adjusting for confounders, a higher PHQ-9 score and total lifetime adversity score was significantly associated with increased odds of poor sleep/no insomnia (class 3) and worst sleep w/insomnia (class 4) compared to the reference group (class 1). A higher self-efficacy score was associated with moderately good sleep (class 2). 
+
+```{r}
+tbl_regression(
+  m1, 
+  exponentiate = TRUE, 
+  include = everything(),
+)
+
+```
+
+
+```{r}
+tbl_regression(
+  m2, 
+  exponentiate = TRUE, 
+  include = everything(),
+)
+
+
+```
+
+
+```{r, fig.width=14, fig.height=6, out.width="100%"}
+p2 = plot_or(m1, df3, "Multinomial Logistic Regression Results (Model 1)")
+```
+
+
+```{r}
+ggsave("forest_plot.png", plot = p2, dpi = 300, width = 14, height = 6, units = "in")
+ggsave("forest_plot.tiff", plot = p2, dpi = 300, width = 14, height = 6, units = "in", compression = "lzw")
+```
+
+```{r, fig.width=12, fig.height=6, out.width="100%"}
+plot_or(m2, df3, "Multinomial Logistic Regression Results (Model 2)")
+```
+

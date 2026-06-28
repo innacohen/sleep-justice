@@ -1,0 +1,738 @@
+---
+title: "Latent Class Analysis"
+author: "Inna Cohen"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, include=T, warning=F)
+
+library(tidyverse)
+library(lubridate)
+library(poLCA)
+library(table1)
+library(haven)
+library(ggplot2)
+library(reshape2)
+library(flextable)
+library(officer)
+
+convert_to_factor_with_labels <- function(df, vars) {
+  df %>%
+    mutate(across(all_of(vars), ~ factor(.x, labels = names(attr(.x, "labels"))), .names = "{col}"))
+}
+
+calculate_ptsd <- function(df) {
+  # List of PTSD symptom variables (column names)
+  vars <- c("Q89_1_1", "Q89_1_2", "Q89_1_3", "Q89_1_4", "Q89_1_5", "Q89_1_6", 
+            "Q89_1_7", "Q89_1_8", "Q89_1_9", "Q89_1_10", "Q89_1_11", "Q89_1_12", 
+            "Q89_1_13", "Q89_1_14", "Q89_1_15", "Q89_1_16", "Q89_1_17")
+  
+  # Shift the values for each of the PTSD symptom columns (1-4 to 0-3)
+  for (i in 1:length(vars)) {
+    df[, vars[i]] <- df[, vars[i]] - 1
+  }
+  
+  # Calculate the row sum for PTSD, ignoring NA values
+  df$ptsd_score <- rowSums(df[, vars], na.rm = TRUE)
+  
+  return(df)
+}
+
+
+
+# Add multiple tables to single microsoft word document  
+#ref:https://stackoverflow.com/questions/49150272/exporting-several-tables-to-word-documents-using-r-package-flextable
+write_word_table <- function(var, doc){
+  # Adjust the flextable layout (for example, resizing columns and setting font size)
+  var <- var %>%
+    flextable::set_table_properties(width = 1, layout = "autofit") %>%
+    flextable::fontsize(size = 8)  # Adjust font size as needed
+  
+  # Add the flextable to the document
+  doc %>%
+    body_add_flextable(var) %>%
+    body_add_break()  # Add a page break after the table
+}
+
+
+pvalue <- function(x, ...) {
+  # Construct vectors of data y, and groups (strata) g
+  y <- unlist(x)
+  g <- factor(rep(1:length(x), times = sapply(x, length)))
+  
+  if (is.numeric(y)) {
+    # For numeric variables with more than two groups, perform a one-way ANOVA
+    if (length(unique(g)) > 2) {
+      p <- summary(aov(y ~ g))[[1]]["Pr(>F)"][1]
+    } else {
+      # For exactly two groups, use a t-test
+      p <- t.test(y ~ g)$p.value
+    }
+  } else {
+    # For categorical variables, perform a chi-squared test of independence
+    p <- chisq.test(table(y, g))$p.value
+  }
+  
+  # Format the p-value without HTML substitution
+  c("", format.pval(p, digits = 3, eps = 0.001))
+}
+
+
+
+map_gen_health = function(value){
+    case_when(value %in% c(1:3) ~ 1,
+              value %in% c(4,5) ~ 0) %>%
+    factor(levels=c(1,0), labels=c("Good to Excellent","Fair/poor"))
+}
+
+
+# Function to map severity levels based on variable name and level
+map_severity <- function(variable, level) {
+  case_when(
+    # PSQI Sleep Satisfaction
+    variable == "psqi_sleep_satisfaction" & level == "Very good" ~ "Low",
+    variable == "psqi_sleep_satisfaction" & level == "Fairly good" ~ "Mild",
+    variable == "psqi_sleep_satisfaction" & level == "Fairly bad" ~ "Moderate",
+    variable == "psqi_sleep_satisfaction" & level == "Very bad" ~ "High",
+    
+    # PSQI Sleep Latency
+    variable == "psqi_sleep_latency" & level == "No sleep latency" ~ "Low",
+    variable == "psqi_sleep_latency" & level == "Mild sleep latency" ~ "Mild",
+    variable == "psqi_sleep_latency" & level == "Moderate sleep latency" ~ "Moderate",
+    variable == "psqi_sleep_latency" & level == "Severe sleep latency" ~ "High",
+
+    # PSQI Sleep Duration
+    variable == "psqi_sleep_duration" & level == "> 7 hours" ~ "Low",
+    variable == "psqi_sleep_duration" & level == "6-7 hours" ~ "Mild",
+    variable == "psqi_sleep_duration" & level == "5-6 hours" ~ "Moderate",
+    variable == "psqi_sleep_duration" & level == "< 5 hours" ~ "High",
+
+    # PSQI Sleep Efficiency
+    variable == "psqi_sleep_efficiency" & level == ">85%" ~ "Low",
+    variable == "psqi_sleep_efficiency" & level == "75-84%" ~ "Mild",
+    variable == "psqi_sleep_efficiency" & level == "65-74%" ~ "Moderate",
+    variable == "psqi_sleep_efficiency" & level == "<65%" ~ "High",
+
+    # PSQI Sleep Disturbance
+    variable == "psqi_sleep_disturbance" & level == "No trouble sleeping or very infrequent disturbances" ~ "Low",
+    variable == "psqi_sleep_disturbance" & level == "Mild trouble sleeping" ~ "Mild",
+    variable == "psqi_sleep_disturbance" & level == "Moderate trouble sleeping" ~ "Moderate",
+    variable == "psqi_sleep_disturbance" & level == "Severe trouble sleeping" ~ "High",
+
+    # PSQI Sleep Alertness
+    variable == "psqi_sleep_alertness" & level == "No daytime dysfunction or very infrequent issues" ~ "Low",
+    variable == "psqi_sleep_alertness" & level == "Mild daytime dysfunction" ~ "Mild",
+    variable == "psqi_sleep_alertness" & level == "Moderate daytime dysfunction" ~ "Moderate",
+    variable == "psqi_sleep_alertness" & level == "Severe daytime dysfunction" ~ "High",
+
+    # Brisc Score Category
+    variable == "brisc_score_cat" & level == "High control" ~ "Low",
+    variable == "brisc_score_cat" & level == "Some control" ~ "Moderate",
+    variable == "brisc_score_cat" & level == "Low control" ~ "High",
+
+    # Bangosa Score Category
+    variable == "bangosa_score_cat" & level == "Low risk" ~ "Low",
+    variable == "bangosa_score_cat" & level == "Moderate risk" ~ "Moderate",
+    variable == "bangosa_score_cat" & level == "High risk" ~ "High",
+
+    # PSQI Insomnia
+    variable == "psqi_insomnia" & level == "Not since my release" ~ "Low",
+    variable == "psqi_insomnia" & level == "Less than once a week" ~ "Mild",
+    variable == "psqi_insomnia" & level == "Once or twice a week" ~ "Moderate",
+    variable == "psqi_insomnia" & level == "Three or more times a week" ~ "High",
+
+    # PSQI Medication Use
+    variable == "psqi_med" & level == "0" ~ "Low",
+    variable == "psqi_med" & level == "1" ~ "Mild",
+    variable == "psqi_med" & level == "2" ~ "Moderate",
+    variable == "psqi_med" & level == "3" ~ "High",
+
+    # Default case if no match
+    TRUE ~ NA_character_
+  )
+}
+
+calculate_cvd_risk <- function(data) {
+  data <- data %>%
+    mutate(
+      # Create numeric indicators for CVD risk factors
+      high_bp = as.numeric(Sys_bp >= 140 | Dias_bp >= 90),  
+      hba1c_8 = as.numeric(Hba1c >= 8),
+      bmi_40 = as.numeric(BMI >= 40),
+      ldl_160 = as.numeric(LDL >= 160),
+
+      # Additional indicators (not included in score)
+      high_LDLcal = factor(high_LDLcal, levels = c(0, 1), labels = c("No", "Yes")),
+      bmi_30 = factor(ifelse(BMI >= 30, 1, 0), levels = c(0, 1), labels = c("No", "Yes")),
+
+      # Count the number of CVD risk factors
+      cvd_risk_count = high_bp + hba1c_8 + bmi_40 + ldl_160,
+
+      # Define primary CVD risk variable (any uncontrolled risk factor present)
+      cvd_risk = factor(ifelse(cvd_risk_count > 0, 1, 0), levels = c(0, 1), labels = c("No", "Yes")),
+
+      # Convert numeric indicators to "No"/"Yes" factors
+      high_bp = factor(high_bp, levels = c(0, 1), labels = c("No", "Yes")),
+      hba1c_8 = factor(hba1c_8, levels = c(0, 1), labels = c("No", "Yes")),
+      bmi_40 = factor(bmi_40, levels = c(0, 1), labels = c("No", "Yes")),
+      ldl_160 = factor(ldl_160, levels = c(0, 1), labels = c("No", "Yes"))
+    )
+  
+  return(data)
+}
+
+```
+
+
+Selected Variables
+
+* Sleep satisfaction (psqi_score_c1)
+* Sleep latency (psqi_score_c2)
+* Sleep duration (psqi_score_c3)
+* Sleep efficiency (psqi_score_c4)
+* Sleep disturbance (psqi_score_c5)
+* Alertness (psqi_score_c7) 
+* Sleep apnea score (bangosa_score_cat)
+* Sleep control (brisc_score_cat)
+
+
+
+Notes:
+
+* Removed Sleep quality (PSQI global score) since it is directly calculated from subcomponents.
+
+
+```{r}
+#update: removed psqi_1, psqi_3 since they are used to calculate sleep_midpoint which is continuous variable 
+vars = c("psqi_score_c1","psqi_score_c2", "psqi_score_c3", "psqi_score_c4", "psqi_score_c5", "psqi_score_c6", "psqi_score_c7", "psqi_5a", "brisc_score_cat","bangosa_score_cat", "survey_type","participant_id")
+
+
+raw_sleep <- read_csv("../data/clean/cleaned_sleep_data.csv", show_col_types = FALSE)
+
+
+sleep = raw_sleep %>%
+  dplyr::select(all_of(vars)) %>%
+  mutate(
+
+    participant_id = as.character(participant_id),
+    
+    # Convert brisc_score_cat to numeric
+    brisc_score_cat = as.numeric(factor(brisc_score_cat, 
+                                        levels = c("low control", "some control", "high control"), 
+                                        labels = c(1, 2, 3))),
+    
+    # Convert bangosa_score_cat to numeric
+    bangosa_score_cat = as.numeric(factor(bangosa_score_cat, 
+                                          levels = c("Low risk", "Moderate risk", "High risk"), 
+                                          labels = c(1, 2, 3)))
+  ) %>%
+  ungroup() %>%
+  filter(survey_type == 1) %>%
+    # Rename columns with snake_case labels
+  rename(
+    psqi_sleep_satisfaction = psqi_score_c1,
+    psqi_sleep_latency = psqi_score_c2,
+    psqi_sleep_efficiency = psqi_score_c4,
+    psqi_sleep_duration = psqi_score_c3,
+    psqi_sleep_alertness = psqi_score_c7,
+    psqi_sleep_disturbance = psqi_score_c5,
+    psqi_insomnia  = psqi_5a,
+    psqi_med = psqi_score_c6)  %>%
+  mutate(psqi_med = case_when(psqi_med %in% c(1,2,3) ~ 1,
+                              psqi_med == 0 ~ 0,
+                              TRUE ~ NA_integer_)) %>%
+    drop_na()
+
+#checked 19
+df_with_na <- sleep %>%
+  filter(if_any(everything(), is.na))
+
+names(df_with_na)
+
+```
+
+
+### Checking assumptions of LCA
+
+https://www.statisticssolutions.com/free-resources/directory-of-statistical-analyses/latent-class-analysis/
+
+https://journals.sagepub.com/doi/full/10.1177/0095798420930932
+
+https://www.sscnet.ucla.edu/polisci/faculty/lewis/pdf/poLCA-JSS-final.pdf
+
+
+Assumptions/Requirements:
+* Non-parametric (no assumptions of linearity, normality, homogeneity)
+* Data type (categorical or binary)
+* Conditional independence (observations should be independent in each class)
+
+General Best Practices:
+* Sample size (suggested 300+)
+* Fewer indicators better (consider collapsing categories together)
+* Use default LCA estimator
+
+poLCA (R Package):
+* Categorical variables need to be coded as integer values and expects all variables to start at level 1 (no 0s, negatives, or decimals allowed, may contain missing)
+*  Not guranteed to converge to global max, may get stuck at local max, always run poLCA at least a couple of times
+*  Both AIC and BIC are measures of model fit where lower values indicate better fit when comparing models.
+
+```{r}
+#Need to add 1 to all PSQI variables.
+#table_list <- lapply(sleep, table)
+#table_list
+
+# Get the names of columns that start with "psqi"
+psqi_vars <- grep("^psqi", names(sleep), value = TRUE)
+
+# Add 1 to all the identified columns
+for (i in 1:length(psqi_vars)) {
+    sleep[, psqi_vars[i]] <- sleep[, psqi_vars[i]] + 1
+}
+
+#check that it worked
+#table_list <- lapply(sleep, table)
+#table_list
+```
+
+
+```{r}
+set.seed(1)
+
+f1 <- as.formula(cbind(psqi_sleep_satisfaction, psqi_sleep_latency, psqi_sleep_efficiency, psqi_sleep_duration, psqi_sleep_alertness, psqi_sleep_disturbance, psqi_insomnia, psqi_med, bangosa_score_cat, brisc_score_cat)~1)
+lc4 <- poLCA(f1, data=sleep, nclass=4, maxiter=3000, nrep=10)
+```
+
+
+```{r}
+#plot(lc4)
+```
+
+
+```{r}
+class_assignments <- lc4$predclass
+
+# reorder classes
+sleep$lc4_class <- class_assignments
+
+sleep$lc4_class <- factor(sleep$lc4_class, 
+                          
+                          levels = c(3, 1, 4, 2), 
+                          
+labels = c(
+  "High-quality controlled sleep\n(Class 1)",
+  "Moderate-quality controlled sleep\n(Class 2)",
+  "Poor-quality limited control sleep with OSA risk\n(Class 3)",
+  "Severely impaired uncontrolled sleepwith insomnia\n(Class 4)"
+))
+
+
+```
+
+```{r}
+#ref: https://www.ahajournals.org/doi/10.1161/JAHA.124.035683?url_ver=Z39.88-2003&rfr_id=ori:rid:crossref.org&rfr_dat=cr_pub%20%200pubmed
+raw_justice = read_sav("../data/raw/JUSTICE  Baseline and POC Jan2024.sav")
+raw_justice_old = read_sav("../data/raw/Baseline and POC_Justice.sav")
+
+a = names(raw_justice_old)
+b = names(raw_justice)
+
+cat_vars = c("Race", "self_gender", "Education", "Civil_status", "Income_4cat", 
+            "Smoke_curr", "cur_alc","Coc_cur", "any_exer", "Sol_time",
+            "Work", "Insured", "Q101", "Residence", "Q78", "Inc_fac", 
+            "parole", "probation", "solitary", "Doc_prov", "ssdi", "foodstamp", 
+            "Food_ins", "mlgrp1","mlgrp2", "mlgrp3", "mlgrp4","mlgrp5", "mlp_work",
+            "Unc_htn0","Unc_dm0","high_ldl0","coronary_dx","Unc_cvd", "Unc_dm0", "Diabetes", "coronary_dx", "HyperLip", "SUD_dx", "Alc_dep_dx")
+
+justice2 = convert_to_factor_with_labels(raw_justice, cat_vars)  %>%
+    
+
+    mutate(Race = factor(Race,
+                        levels = c("Non-hispanic white", "Non-hispanic black", "Hispanic", "Native american", "Asian", "Hawaian", "Other"),
+                        labels = c("Non-hispanic white", "Non-hispanic black", "Hispanic", "Non-hispanic other", "Non-hispanic other", "Non-hispanic other", "Non-hispanic other")),
+           total_incar_months = (Q81_1_1_1 * 12) + Q81_2_1_1,
+           Gen_health = map_gen_health(Q83)) 
+    
+
+sleep2 = sleep %>%
+    mutate(
+        psqi_sleep_satisfaction = factor(psqi_sleep_satisfaction, levels=c(1:4), labels=c("Very good", "Fairly good", "Fairly bad", "Very bad")),
+                                         psqi_sleep_latency = factor(psqi_sleep_latency, levels=c(1:4), labels = c("No sleep latency", 
+                     "Mild sleep latency", 
+                 "Moderate sleep latency", 
+                "Severe sleep latency")),
+psqi_sleep_duration = factor(psqi_sleep_duration, levels=c(1:4), labels=c("> 7 hours", "6-7 hours", "5-6 hours", "< 5 hours")),
+psqi_sleep_efficiency = factor(psqi_sleep_efficiency, levels=c(1:4), labels=c(">85%", "75-84%","65-74%", "<65%")),
+psqi_sleep_disturbance = factor(psqi_sleep_disturbance, levels=c(1:4), 
+                       labels = c("No trouble sleeping or very infrequent disturbances", 
+                         "Mild trouble sleeping", 
+                         "Moderate trouble sleeping", 
+                        "Severe trouble sleeping")),
+psqi_sleep_alertness = factor(psqi_sleep_alertness, levels=c(1:4),
+                                labels = c("No daytime dysfunction or very infrequent issues", 
+                                                "Mild daytime dysfunction", 
+                                                "Moderate daytime dysfunction", 
+                                                "Severe daytime dysfunction")),
+psqi_insomnia = factor(psqi_insomnia, levels=c(1:4), labels=c("Not since my release", "Less than once a week", "Once or twice a week", "Three or more times a week")),
+
+psqi_med = factor(factor(psqi_med, levels=c(2,1), labels=c("Sometimes/Regularly", "Not Since My Release"))), 
+
+brisc_score_cat = factor(brisc_score_cat, levels = c(1:3), labels=c("Low control", "Some control", "High control")),
+
+bangosa_score_cat = factor(bangosa_score_cat, levels = c(1:3),  labels = c("Low risk", "Moderate risk", "High risk"))
+)
+
+
+
+sleep3 = sleep2 %>%
+        left_join(justice2, by=c("participant_id"="Q1")) %>%
+    calculate_cvd_risk(.) 
+
+sleep_justice = sleep3 %>%
+    mutate(
+        Work = (Work == "Yes"),
+        Insured = (Insured == "Yes"),
+        Diabetes = (Diabetes == "Yes"),
+        coronary_dx = (coronary_dx == "Yes"),
+        HyperLip = (HyperLip == "Yes"),
+        HTN = (HTN == 1),
+        bmi_30 = (bmi_30 == "Yes"),
+        SUD_dx = (SUD_dx == "Yes"),
+        Alc_dep_dx = (Alc_dep_dx == "Yes"),
+        Smoke_curr = (Smoke_curr == "Yes"),
+        cur_alc = (cur_alc == "Yes"),
+        Coc_cur = (Coc_cur == "Yes"),
+        any_exer = (any_exer == "Yes"),
+        
+        parole = (parole == "Yes"),
+        probation = (probation == "Yes"),
+        solitary = (solitary == "Yes"),
+        Food_ins = (Food_ins == "Yes")
+        
+        
+        
+
+
+    )
+    
+
+
+sj_old = sleep2 %>% inner_join(raw_justice_old, by=c("participant_id"="Q1"))
+```
+
+
+
+```{r}
+
+
+
+
+sleep_justice$Demo_header <- NA
+label(sleep_justice$Demo_header) <- "Demographic and Structural factors"
+
+label(sleep_justice$Age) = "Age"
+label(sleep_justice$Race) = "Race"
+label(sleep_justice$self_gender) = "Gender"
+label(sleep_justice$Education) = "Education"
+label(sleep_justice$Civil_status) = "Marital status"
+label(sleep_justice$Income_4cat) = "Average monthly income"
+label(sleep_justice$Gen_health) = "General Health"
+label(sleep_justice$Work) = "Employed"
+label(sleep_justice$Insured) = "Health insurance"
+label(sleep_justice$Residence) = "Housing status"
+
+sleep_justice$Clinical_Header <- NA
+label(sleep_justice$Clinical_Header) <- "Clinical factors (history)"
+label(sleep_justice$Diabetes) ="Diabetes"
+label(sleep_justice$coronary_dx) = "Coronary disease"
+label(sleep_justice$HyperLip) = "Hypercholesterolemia"
+label(sleep_justice$HTN) = "Hypertension"
+label(sleep_justice$bmi_30) = "Obesity, BMI >=30 kg/m2"
+label(sleep_justice$SUD_dx) = "History of drug use disorder"
+label(sleep_justice$Alc_dep_dx) = "History of alcohol use disorder"
+
+
+
+
+sleep_justice$Beh_Header <- NA
+label(sleep_justice$Beh_Header) <- "Behavioral factors (postrelease)"
+
+label(sleep_justice$Smoke_curr) =  "Smoking"
+label(sleep_justice$Av_cigsmoke) = "Number of current daily cigarettes, median (IQR)"
+label(sleep_justice$cur_alc) = "Alcohol use"
+label(sleep_justice$Coc_cur) = "Cocaine use"
+label(sleep_justice$any_exer) = "Physical exercise"
+
+sleep_justice$Psych_Header <- NA
+label(sleep_justice$Psych_Header) <- "Psychosocial factors, mean±SD, [range]"
+label(sleep_justice$Discrim_score) = "Everyday discrimination (9 items)"
+label(sleep_justice$Pss_score) = "Perceived Stress Scale (10 items)"
+label(sleep_justice$GSE_score) = "General Self-Efficacy Scale (10 items)"
+label(sleep_justice$PHQ9_score) = "Depression (PHQ-9) (9 items)"
+label(sleep_justice$ptsd_score) = "PTSD Symptom Scale (17 items)"
+label(sleep_justice$Adv_score) = "Cumulative Adversity Interview (33 items)"
+
+
+sleep_justice$Corr_Header <- NA
+label(sleep_justice$Corr_Header) <- "Correctional-specific factors/collateral sanctions"
+label(sleep_justice$Q78) = "Lifetime incarceration"
+label(sleep_justice$total_incar_months) = "Lifetime incarcerated; mo, median (IQR)"
+label(sleep_justice$Inc_fac) = "Index incarceration"
+label(sleep_justice$P_stay) = "Length of incarceration; mo, median (IQR)"
+label(sleep_justice$parole) = "On parole"
+label(sleep_justice$probation) = "On probation"
+label(sleep_justice$solitary) = "Solitary confinement during last incarceration"
+label(sleep_justice$Food_ins) = "Without food for a whole day since release"
+
+
+```
+
+
+
+```{r}
+render_header <- function(x, name, ...) {
+  if (all(is.na(x))) {
+    return(c(" " = label(x)))  # Shows only the label as a row with no stats
+  } else {
+    return(render.default(x, name, ...))  # Fallback for normal variables
+  }
+}
+
+render_yes <- function(x, ...) {
+    y <- render.default(x, ...)
+    if (is.logical(x)) y[2] else y
+}
+
+
+# Renderer for median [IQR]
+render_median_iqr <- function(x) {
+  if (all(is.na(x))) return("NA")
+  med <- median(x, na.rm = TRUE)
+  q <- quantile(x, probs = c(0.25, 0.75), na.rm = TRUE)
+  iqr <- q[2] - q[1]
+  sprintf("%.1f (%.1f)", med, iqr)
+}
+
+
+
+render_mean_sd_range <- function(x) {
+  m <- mean(x, na.rm = TRUE)
+  s <- sd(x, na.rm = TRUE)
+  r <- range(x, na.rm = TRUE)
+  sprintf("%.1f ± %.1f [%.1f–%.1f]", m, s, r[1], r[2])
+}
+
+mean_vars <- c(
+  "Age",
+  "Discrim_score", "Pss_score", "GSE_score",
+  "PHQ9_score", "ptsd_score", "Adv_score"
+)
+
+median_vars <- c(
+  "Av_cigsmoke", "total_incar_months", "P_stay"
+)
+
+rndr <- function(x, name, ...) {
+  # Header-only rows
+  if (all(is.na(x))) {
+    return(c(" " = label(x)))
+  }
+
+  # Logical variables — show only Yes
+  if (is.logical(x)) {
+    y <- render.default(x, name, ...)
+    return(y[2])
+  }
+
+  # Mean ± SD [range]
+  if (name %in% mean_vars) {
+    return(render_mean_sd_range(x))
+  }
+
+  # Median [IQR]
+  if (name %in% median_vars) {
+    return(render_median_iqr(x))
+  }
+
+  # Fallback for numeric vars not listed
+  if (is.numeric(x)) {
+    return(render_mean_sd_range(x))  # or return(render_median_iqr(x)) if you want to force
+  }
+
+  # Categorical fallback
+  return(render.categorical.default(x))
+}
+
+
+t1 = table1(~Demo_header  + Age + Race + self_gender + Education + Civil_status +  Income_4cat + Gen_health + Work + Insured + Residence + Clinical_Header +
+Diabetes + coronary_dx + HyperLip + HTN + bmi_30 + SUD_dx + Alc_dep_dx + 
+    Beh_Header + Smoke_curr + Av_cigsmoke + cur_alc + Coc_cur + any_exer + Psych_Header + Discrim_score + Pss_score + GSE_score + PHQ9_score + ptsd_score + Adv_score + Corr_Header + Q78 + total_incar_months + Inc_fac + P_stay + parole + probation + solitary + Food_ins, data=sleep_justice, caption =  "Table 1. Participant Characteristics at Baseline Visit (N = 266)", render=rndr)
+
+t1
+
+
+
+```
+```{r}
+
+my.render.cont <- function(x, ...) {
+  if (all(is.na(x))) return("NA")
+  
+  s <- stats.default(x)
+  med <- median(x, na.rm = TRUE)
+  q <- quantile(x, probs = c(0.25, 0.75), na.rm = TRUE)
+  iqr <- q[2] - q[1]
+  
+  c(
+    "",
+    "Mean (SD)"    = sprintf("%s (%s)", round_pad(s$MEAN, 1), round_pad(s$SD, 1)),
+    "Median (IQR)" = sprintf("%.1f (%.1f)", med, iqr)
+  )
+}
+
+
+t2 = table1(~Age + Race + self_gender + Education + Civil_status +  Income_4cat + Gen_health + Work + Insured + Residence +
+Diabetes + coronary_dx + HyperLip + HTN + bmi_30 + SUD_dx + Alc_dep_dx + Smoke_curr + Av_cigsmoke + cur_alc + Coc_cur + any_exer + Discrim_score + Pss_score + GSE_score + PHQ9_score + ptsd_score + Adv_score + Q78 + total_incar_months + Inc_fac + P_stay + parole + probation + solitary + Food_ins | lc4_class, data=sleep_justice, render.continuous = my.render.cont, caption = "Table 2. Participant Characteristics Stratified by Class", extra.col=list(`P-value`=pvalue), overall=F)
+
+t2
+```
+
+
+
+
+
+```{r}
+
+t3 = table1(~psqi_sleep_satisfaction + psqi_sleep_latency + psqi_sleep_duration + psqi_sleep_efficiency + psqi_sleep_disturbance + psqi_sleep_alertness + brisc_score_cat + bangosa_score_cat + psqi_insomnia + psqi_med | lc4_class, caption="Outcomes by lc4_class", data=sleep_justice, extra.col=list(`P-value`=pvalue), overall=F)
+t3
+
+```
+
+
+```{r}
+#Supplemental
+
+label(sleep_justice$Q101) = "Have a primary care provider"
+label(sleep_justice$ssdi) = "Receiving disability insurance"
+label(sleep_justice$foodstamp) = "Receiving Food Stamps"
+label(sleep_justice$mlgrp3 ) = "Child support"
+label(sleep_justice$mlp_work) = "Barriers to employment/licensure based on criminal record"
+label(sleep_justice$mlgrp1) = "Debt/restitution"
+label(sleep_justice$Doc_prov) = "Saw health care provider during last incarceration"
+label(sleep_justice$mlgrp2) = "Public benefits"
+label(sleep_justice$mlgrp4) = "Housing"
+label(sleep_justice$mlgrp5) = "Healthcare Access"
+label(sleep_justice$Sol_time) = "Solitary time"
+label(sleep_justice$Unc_htn0) = "Uncontrolled Hypertension"
+label(sleep_justice$Unc_dm0) = "Uncontrolled Diabetes"
+label(sleep_justice$Dias_bp) = "Diastolic blood pressure"
+label(sleep_justice$high_bp) = "CVD RF 1: High blood pressure (SBP >= 140 or DBP >=90)"
+label(sleep_justice$bmi_40) = "CVD RF 2: High BMI (BMI >= 40)"
+label(sleep_justice$hba1c_8) = "CVD RF 3: High HbA1c (HbA1c >= 8)"
+label(sleep_justice$ldl_160) = "CVD RF 4: High LDL (LDL >= 160)"
+label(sleep_justice$cvd_risk_count) = "Count of CVD RF"
+label(sleep_justice$cvd_risk) = "CVD RF Any"
+
+
+supp1 = table1(~ Q101 + ssdi + foodstamp + mlgrp3 + mlp_work + mlgrp1 + Doc_prov + mlgrp2 + mlgrp4 + mlgrp5 +  Sol_time + Chol_Tot + Chol_HDL + Trig + LDL + LDL_cal + TC_HDL + LDL_HDL + Non_HDL +
+               LE_diet + Ex_time + week_xtime  + LE8_exercise + LE8_smoke + LE8_bmi + 
+               LE8_lipids + LE8_gluc  + LE8_zz + LE8_score +  Unc_htn0 + Unc_dm0 + high_ldl0 + high_LDLcal + Unc_cv40 + Unc_cvd + Unc_dm0 + Sys_bp + Dias_bp + high_bp + BMI  + bmi_40  + Hba1c + hba1c_8 + ldl_160 + cvd_risk_count + cvd_risk,
+               caption = "Supplemental", 
+               data = sleep_justice)
+
+
+supp2 = table1(~ Q101 + ssdi + foodstamp + mlgrp3 + mlp_work + mlgrp1 + Doc_prov + mlgrp2 + mlgrp4 + mlgrp5 +  Sol_time + Chol_Tot + Chol_HDL + Trig + LDL + LDL_cal + TC_HDL + LDL_HDL + Non_HDL +
+               LE_diet + Ex_time + week_xtime  + LE8_exercise + LE8_smoke + LE8_bmi + 
+               LE8_lipids + LE8_gluc  + LE8_zz + LE8_score +  Unc_htn0 + Unc_dm0 + high_ldl0 + high_LDLcal + Unc_cv40 + Unc_cvd + Unc_dm0 + Sys_bp + Dias_bp + high_bp + BMI  + bmi_40  + Hba1c + hba1c_8 + ldl_160 + cvd_risk_count + cvd_risk 
+               | lc4_class, 
+               caption = "Supplemental", 
+               data = sleep_justice, 
+               extra.col = list(`P-value` = pvalue), 
+               overall = FALSE)
+
+
+supp1
+```
+
+
+```{r}
+supp2
+```
+
+
+
+
+
+```{r}
+
+# Selecting relevant columns and merging with raw_sleep dataset
+figure_df <- sleep_justice %>%
+    dplyr::select(participant_id, starts_with("psqi"), starts_with("bangosa"), starts_with("brisc"), "lc4_class") %>%
+    left_join(
+        raw_sleep %>%
+            filter(survey_type == 1) %>%
+            mutate(participant_id = as.character(participant_id)) %>%
+            dplyr::select(participant_id, psqi_score_c6), 
+        by = "participant_id"
+    ) %>%
+    mutate(psqi_med = as.character(psqi_score_c6)) %>%
+    dplyr::select(-psqi_score_c6) %>%
+    pivot_longer(cols = -c(participant_id, lc4_class), names_to = "Variable", values_to = "Level") %>%
+    mutate(Severity = map2_chr(Variable, Level, map_severity)) %>%
+    mutate(Severity = factor(Severity, levels = c("Low", "Mild", "Moderate", "High"))) %>% drop_na(Severity)
+
+
+
+p = ggplot(figure_df, aes(x = Variable, fill = Severity)) +
+  geom_bar(position = "fill") +
+  facet_wrap(~ lc4_class, nrow = 2) +
+  labs(x = "Sleep Metrics", y = "Proportion", fill = "Severity") +
+  scale_fill_manual(values = c("Low" = "#00D87E",    # Green
+                               "Mild" = "#CFF460",   # Yellow
+                               "Moderate" = "#FF9C8F", # Orange
+                               "High" = "#F75F86")) + # Red
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+p
+```
+```{r}
+ggsave("panel.png", plot = p, dpi = 300, width = 10, height = 8, units = "in")
+ggsave("panel.tiff", plot = p, dpi = 300, width = 10, height = 8, units = "in", compression = "lzw")
+```
+
+```{r}
+# EXPORT TABLES -----------------------------------------------------------
+# list of tables and the doc
+my_list <- list(df5 <- t1flex(supp2),
+                df4 <- t1flex(supp1),
+                df3 <- t1flex(t3),
+                df2 <- t1flex(t2),
+                df1 <- t1flex(t1))
+
+my_doc <- read_docx()
+
+
+# use walk (the invisible function of map) to include all tables in one doc
+walk(my_list, write_word_table, my_doc) 
+fname = paste0("../output/lca_tables_",Sys.Date(),".docx")
+print(my_doc, target = fname) %>% invisible()
+
+```
+
+
+
+```{r}
+
+psqi_df <- read_csv("../data/clean/cleaned_sleep_data.csv", show_col_types = FALSE, col_select = c("participant_id","psqi_score_global_cat","survey_type")) %>%
+    mutate(participant_id = as.character(participant_id))
+
+
+sleep_justice = sleep3 %>%
+    left_join(psqi_df, by=c("participant_id", "survey_type")) 
+
+save(sleep_justice, file="../data/clean/sleep_justice.Rda")
+```
+
